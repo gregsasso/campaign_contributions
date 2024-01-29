@@ -1,0 +1,77 @@
+library(tidyverse)
+library(DBI)
+library(RSQLite)
+library(dbplyr)
+
+# Create a connection to the database
+con <- dbConnect(RSQLite::SQLite(), "E:/DIME_database/dime_v3_1.sqlite3")
+
+# Function to retrieve and process data for a given year
+get_weighted_avg_df <- function(year, con) {
+  query <- glue::glue("
+    SELECT 
+      ca.bonica_rid,
+      ca.fecyear AS election,
+      ca.name,
+      ca.party,
+      ca.state,
+      ca.district,
+      ca.seat,
+      ca.ico_status AS incumbent,
+      ca.cand_gender AS gender,
+      ca.recipient_cfscore AS cand_cfscore,
+      ca.dwdime AS cand_dwdime,
+      ca.gen_vote_pct,
+      ca.gwinner,
+      SUM(co.amount * d.contributor_cfscore) / SUM(co.amount) AS avg_contributor_cfscore,
+      SUM(co.amount) AS total_amount, 
+      ca.total_receipts,
+      ca.num_givers,
+      COUNT(co.transaction_id) AS num_transactions,
+      COUNT(DISTINCT co.bonica_cid) AS num_unique_contributors
+    FROM 
+      contribDB co
+    JOIN 
+      candDB ca ON co.bonica_rid = ca.bonica_rid AND co.cycle = ca.cycle 
+    JOIN 
+      donorDB d ON co.bonica_cid = d.bonica_cid
+    WHERE 
+      ca.fecyear = {year} AND
+      ca.election LIKE 'fd{year}%' AND
+      d.is_projected = 0 AND
+      ca.seat IN ('federal:house', 'federal:senate') AND
+      ca.party != 328 AND
+      ca.gen_vote_pct > 0 AND
+      ca.gwinner IS NOT NULL
+    GROUP BY 
+      ca.bonica_rid
+    ORDER BY 
+      ca.bonica_rid ASC")
+  
+  dbGetQuery(con, query) %>%
+    mutate(party = ifelse(party == 100, "D", "R")) %>%
+    as_tibble()
+}
+
+# Apply the function to each year and store results in a list
+years <- seq(1980, 2022, by = 2)
+weighted_avg_df_year <- lapply(years, get_weighted_avg_df, con = con)
+
+names(weighted_avg_df_year) <- as.character(years)
+
+# Close the database connection
+dbDisconnect(con)
+
+# Create a dataframe with all years
+all_cand <- bind_rows(weighted_avg_df_year, .id = "year")
+
+#Histograms of average contributor cfscore by party by year
+ggplot(all_cand, aes(x = avg_contributor_cfscore, fill = party)) +
+  geom_histogram(binwidth = 0.1) +
+  facet_wrap(~year, ncol = 2) +
+  scale_fill_manual(values = c("blue", "red")) +
+  labs(title = "Histogram of Average Contributor CFscores by Party by Year",
+       x = "Average Contributor CFscore",
+       y = "Count") +
+  theme_minimal()
+
